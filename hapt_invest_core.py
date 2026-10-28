@@ -291,3 +291,9 @@ if __name__ == '__main__':
             logging.error(f"Scan Loop Exception: {e}")
         
         time.sleep(300)
+
+# --- HAPT INVEST TELEGRAM NOTIFICATION HOOK ---
+try:
+    from telegram_notifier import send_telegram_alert
+except ImportError:
+    def send_telegram_alert(msg): pass
