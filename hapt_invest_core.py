@@ -114,77 +114,28 @@ class MarketGatekeeper:
 
     @staticmethod
     def is_us_open() -> bool:
-        now_utc = datetime.utcnow()
-        if now_utc.weekday() >= 5:
-            return False
-        current_time = now_utc.time()
-        # US (NYSE/NASDAQ): 13:30 to 21:00 UTC
-        return dtime(13, 30) <= current_time <= dtime(21, 0)
+    """
+    Dynamically checks if US market is in its active window (8:30 AM to 4:00 PM Eastern Time),
+    accounting automatically for US/UK clock changes.
+    """
+    try:
+        from zoneinfo import ZoneInfo # Python 3.9+ standard library
+    except ImportError:
+        from pytz import timezone as ZoneInfo
+        
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        # Fallback if timezone database is missing
+        now_et = datetime.now()
 
-class TechnicalEngine:
-    @staticmethod
-    def analyze_ticker(ticker: str, is_uk: bool = False) -> dict:
-        try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="10d", interval="5m")
-            if hist.empty or len(hist) < 50:
-                return None
+    if now_et.weekday() >= 5: # Weekend check
+        return False
+        
+    current_time = now_et.time()
+    # 8:30 AM ET (1 hour pre-market scan start) to 4:00 PM ET (EOD close)
+    return dtime(8, 30) <= current_time <= dtime(16, 0)
 
-            close_prices = hist['Close']
-            volume = hist['Volume']
-            high_prices = hist['High']
-            low_prices = hist['Low']
-
-            current_price = float(close_prices.iloc[-1])
-            prev_close = float(close_prices.iloc[-2])
-            pct_change = ((current_price - prev_close) / prev_close) * 100
-
-            if pct_change <= 0.3:
-                return None
-
-            vwap = (hist['Volume'] * (hist['High'] + hist['Low'] + hist['Close']) / 3).sum() / hist['Volume'].sum()
-            if current_price < vwap:
-                return None
-
-            avg_vol = volume.iloc[-20:].mean()
-            current_vol = volume.iloc[-1]
-            rvol = (current_vol / avg_vol) if avg_vol > 0 else 0.0
-
-            if rvol < 1.4:
-                return None
-
-            tr = np.maximum(high_prices - low_prices, np.abs(low_prices - close_prices.shift(1)))
-            atr = float(tr.rolling(14).mean().iloc[-1])
-            avg_atr = float(tr.mean())
-            atr_expansion = (atr / avg_atr) if avg_atr > 0 else 1.0
-
-            if atr_expansion < 1.2:
-                return None
-
-            grade = "GRADE A+" if rvol >= 1.8 and atr_expansion >= 1.3 else ("GRADE A" if rvol >= 1.4 else "GRADE B"); # "GRADE A"
-            confidence = 90 if grade == "GRADE A+" else 80
-
-            stop_loss = round(current_price - (1.5 * atr), 2)
-            tp1 = round(current_price + (2.0 * atr), 2)
-            tp2 = round(current_price + (3.5 * atr), 2)
-
-            return {
-                "ticker": ticker,
-                "market": "LSE" if is_uk else ("NASDAQ" if "AAPL" in ticker or "NVDA" in ticker else "NYSE"),
-                "signal_type": "BUY",
-                "grade": grade,
-                "confidence": confidence,
-                "price": round(current_price, 2),
-                "pct_change": round(pct_change, 2),
-                "stop_loss": stop_loss,
-                "tp1": tp1,
-                "tp2": tp2,
-                "rvol": round(rvol, 2),
-                "atr_expansion": round(atr_expansion, 2)
-            }
-        except Exception as e:
-            logging.error(f"Error analyzing {ticker}: {e}")
-            return None
 
 def dispatch_telegram_alert(sig: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -297,3 +248,37 @@ try:
     from telegram_notifier import send_telegram_alert
 except ImportError:
     def send_telegram_alert(msg): pass
+
+def check_and_apply_breakeven(position, current_price):
+    """
+    Checks if an open position has reached +1R profit.
+    If so, shifts stop loss to entry price (breakeven).
+    """
+    entry_price = position.get("entry_price")
+    initial_stop = position.get("stop_loss")
+    order_id = position.get("stop_order_id")
+    breakeven_applied = position.get("breakeven_applied", False)
+
+    if breakeven_applied or not entry_price or not initial_stop:
+        return position
+
+    # Calculate initial risk R
+    risk_r = abs(entry_price - initial_stop)
+    target_1r = entry_price + risk_r  # Assuming long position
+
+    if current_price >= target_1r:
+        print(f"?? [+1R REACHED] Ticker {position.get('ticker')} hit +1R (${target_1r:.2f}). Moving stop to breakeven: ${entry_price:.2f}")
+        try:
+            from alpaca_execution import modify_stop_loss
+            if order_id:
+                modify_stop_loss(order_id, entry_price)
+            position["stop_loss"] = entry_price
+            position["breakeven_applied"] = True
+            
+            # Send Telegram notification
+            from telegram_notifier import send_telegram_alert
+            send_telegram_alert(f"??? *HAPT INVEST BREAKEVEN LOCK* ???\n? *Ticker*: `{position.get('ticker')}`\n? *Hit*: +1R target\n? *Stop Loss*: Moved to Breakeven (`${entry_price:.2f}`)")
+        except Exception as e:
+            print(f"[ERROR] Failed to update stop loss to breakeven: {e}")
+
+    return position
