@@ -367,7 +367,14 @@ def calculate_breakout_confidence(rvol: float, atr_expansion: float) -> str:
 
 
 
-def send_interactive_telegram_alert(ticker: str, price: float, grade: str, signal_type: str):
+
+
+def calculate_ai_confidence_score(rvol: float, atr_expansion: float) -> int:
+    """Calculates a dynamic AI confidence percentage (60% to 99%) based on momentum depth."""
+    raw_score = 50 + (rvol * 10) + (atr_expansion * 5)
+    return min(99, max(60, int(raw_score)))
+
+def send_interactive_telegram_alert(ticker: str, price: float, grade: str, signal_type: str, rvol: float, atr_expansion: float):
     import requests
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -375,13 +382,17 @@ def send_interactive_telegram_alert(ticker: str, price: float, grade: str, signa
     if not bot_token or not chat_id:
         return False
         
+    confidence_pct = calculate_ai_confidence_score(rvol, atr_expansion)
+    
     message = (
-        f"?? <b>[HAPT INVEST] BREAKOUT ALERT</b>\n"
-        f"???????????????????\n"
+        "?? <b>[HAPT INVEST] AI BREAKOUT REVIEW</b>\n"
+        "???????????????????\n"
         f"Ticker: <b>{ticker}</b>\n"
-        f"Action: <b>{signal_type}</b> | Grade: <b>{grade}</b>\n"
+        f"Action: <b>{signal_type}</b>\n"
+        f"Momentum Grade: <b>{grade}</b>\n"
+        f"AI Confidence: <b>{confidence_pct}%</b>\n"
         f"Trigger Price: <b>${price:.2f}</b>\n"
-        f"???????????????????"
+        "???????????????????"
     )
     
     payload = {
@@ -391,7 +402,7 @@ def send_interactive_telegram_alert(ticker: str, price: float, grade: str, signa
         "reply_markup": {
             "inline_keyboard": [
                 [
-                    {"text": f"? Accept & Execute {ticker}", "callback_data": f"exec_buy_{ticker}"},
+                    {"text": f"? Accept & Execute ({confidence_pct}%)", "callback_data": f"exec_buy_{ticker}"},
                     {"text": "? Reject", "callback_data": f"reject_{ticker}"}
                 ]
             ]
