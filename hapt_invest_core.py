@@ -114,27 +114,25 @@ class MarketGatekeeper:
 
     @staticmethod
     def is_us_open() -> bool:
-    """
-    Dynamically checks if US market is in its active window (8:30 AM to 4:00 PM Eastern Time),
-    accounting automatically for US/UK clock changes.
-    """
-    try:
-        from zoneinfo import ZoneInfo
-    except ImportError:
-        from pytz import timezone as ZoneInfo
-        
-    try:
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
-        now_et = datetime.now()
+        """
+        Dynamically checks if US market is in its active window (8:30 AM to 4:00 PM Eastern Time),
+        accounting automatically for US/UK clock changes.
+        """
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            from pytz import timezone as ZoneInfo
+            
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now()
 
-    if now_et.weekday() >= 5: # Weekend check
-        return False
-        
-    current_time = now_et.time()
-    return dtime(8, 30) <= current_time <= dtime(16, 0)
-
-
+        if now_et.weekday() >= 5: # Weekend check
+            return False
+            
+        current_time = now_et.time()
+        return dtime(8, 30) <= current_time <= dtime(16, 0)
 def dispatch_telegram_alert(sig: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logging.info(f"[ALERT PREVIEW] {sig['ticker']} ({sig['market']}) | {sig['grade']} | Price: ${sig['price']:.2f} | SL: ${sig['stop_loss']:.2f} | TP1: ${sig['tp1']:.2f}")
