@@ -31,3 +31,12 @@ def fetch_realtime_5m_bars(ticker):
     # Fallback for UK (LSE) tickers or API key bypass
     data = yf.download(tickers=ticker, period="2d", interval="5m", progress=False)
     return data
+
+
+def run_phase2_pipeline(watchlist=None):
+    """
+    Bridges main.py Module 1 call to HAPT INVEST core intraday scan engine.
+    """
+    import hapt_invest_core
+    print("[SCANNER ENGINE] Initializing Phase 2 Intraday Breakout Pipeline...")
+    hapt_invest_core.run_intraday_scan_cycle()
