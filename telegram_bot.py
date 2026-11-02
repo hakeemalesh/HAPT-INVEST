@@ -1,4 +1,4 @@
-﻿import os
+import os
 os.environ["TELEGRAM_BOT_TOKEN"] = "8740075368:AAFQ29GbkZvVhO01SePMnzYyDh-s-NZcM0Q"
 
 import logging

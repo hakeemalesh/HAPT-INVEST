@@ -1,4 +1,4 @@
-﻿import os
+import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
 os.environ["APCA_API_KEY_ID"] = "PKVEJ4HX3LOBLG3W3UPLKUT7A3"

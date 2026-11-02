@@ -1,4 +1,3 @@
-from scanner_engine import TechnicalEngine
 from audit_telemetry import send_heartbeat_alert
 # -*- coding: utf-8 -*-
 """
@@ -172,6 +171,72 @@ def dispatch_telegram_alert(sig: dict):
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
         logging.error(f"Failed to dispatch Telegram message: {e}")
+
+class TechnicalEngine:
+    @staticmethod
+    def analyze_ticker(ticker: str, is_uk: bool = False) -> dict:
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="10d", interval="5m")
+            if hist.empty or len(hist) < 50:
+                return None
+
+            close_prices = hist['Close']
+            volume = hist['Volume']
+            high_prices = hist['High']
+            low_prices = hist['Low']
+
+            current_price = float(close_prices.iloc[-1])
+            prev_close = float(close_prices.iloc[-2])
+            pct_change = ((current_price - prev_close) / prev_close) * 100
+
+            if pct_change <= 0.3:
+                return None
+
+            vwap = (hist['Volume'] * (hist['High'] + hist['Low'] + hist['Close']) / 3).sum() / hist['Volume'].sum()
+            if current_price < vwap:
+                return None
+
+            avg_vol = volume.iloc[-20:].mean()
+            current_vol = volume.iloc[-1]
+            rvol = (current_vol / avg_vol) if avg_vol > 0 else 0.0
+
+            if rvol < 1.4:
+                return None
+
+            tr = np.maximum(high_prices - low_prices, np.abs(low_prices - close_prices.shift(1)))
+            atr = float(tr.rolling(14).mean().iloc[-1])
+            avg_atr = float(tr.mean())
+            atr_expansion = (atr / avg_atr) if avg_atr > 0 else 1.0
+
+            if atr_expansion < 1.2:
+                return None
+
+            grade = "GRADE A+" if rvol >= 2.0 and atr_expansion >= 1.5 else "GRADE A"
+            confidence = 90 if grade == "GRADE A+" else 80
+
+            stop_loss = round(current_price - (1.5 * atr), 2)
+            tp1 = round(current_price + (2.0 * atr), 2)
+            tp2 = round(current_price + (3.5 * atr), 2)
+
+            return {
+                "ticker": ticker,
+                "market": "LSE" if is_uk else ("NASDAQ" if "AAPL" in ticker or "NVDA" in ticker else "NYSE"),
+                "signal_type": "BUY",
+                "grade": grade,
+                "confidence": confidence,
+                "price": round(current_price, 2),
+                "pct_change": round(pct_change, 2),
+                "stop_loss": stop_loss,
+                "tp1": tp1,
+                "tp2": tp2,
+                "rvol": round(rvol, 2),
+                "atr_expansion": round(atr_expansion, 2)
+            }
+        except Exception as e:
+            logging.error(f"Error analyzing {ticker}: {e}")
+            return None
+
 
 def run_intraday_scan_cycle():
     logging.info("Initiating Intraday Market Scan Cycle...")

@@ -1,4 +1,4 @@
-﻿import scanner_engine
+import scanner_engine
 import valuation_engine
 import escalator_engine
 

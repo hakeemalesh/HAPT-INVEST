@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
