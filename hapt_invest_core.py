@@ -243,6 +243,7 @@ class TechnicalEngine:
 
 
 def run_intraday_scan_cycle():
+    DatabaseManager.init_db()
     logging.info("Initiating Intraday Market Scan Cycle...")
     lse_active = MarketGatekeeper.is_lse_open()
     us_active = MarketGatekeeper.is_us_open()
