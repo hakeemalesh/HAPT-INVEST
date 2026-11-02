@@ -49,8 +49,10 @@ LSE_TICKERS = ["SHEL.L", "AZN.L", "HSBA.L", "BP.L", "GSK.L", "RIO.L", "ULVR.L", 
 class DatabaseManager:
     @staticmethod
     def init_db():
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect("hapt_invest.db")
         cursor = conn.cursor()
+        
+        # Create base table if not exists
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,32 +61,34 @@ class DatabaseManager:
                 market TEXT,
                 signal_type TEXT,
                 grade TEXT,
-                confidence INTEGER,
+                confidence REAL,
                 price REAL,
-                stop_loss REAL,
-                tp1 REAL,
-                tp2 REAL,
-                rvol REAL,
-                atr_expansion REAL,
                 status TEXT
             )
         """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS executed_orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_id INTEGER,
-                timestamp TEXT,
-                ticker TEXT,
-                entry_price REAL,
-                execution_price REAL,
-                slippage_pct REAL,
-                status TEXT
-            )
-        """)
+        
+        # Ensure all modern telemetry columns exist (auto-migration)
+        cursor.execute("PRAGMA table_info(signals)")
+        existing_cols = [col[1] for col in cursor.fetchall()]
+        
+        required_columns = {
+            "stop_loss": "REAL",
+            "tp1": "REAL",
+            "tp2": "REAL",
+            "rvol": "REAL",
+            "atr_expansion": "REAL"
+        }
+        
+        for col_name, col_type in required_columns.items():
+            if col_name not in existing_cols:
+                try:
+                    cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+                    print(f"[DB MIGRATION] Added missing column '{col_name}' to signals table.")
+                except Exception as e:
+                    print(f"[DB MIGRATION] Notice on adding {col_name}: {e}")
+                    
         conn.commit()
         conn.close()
-
-    @staticmethod
     def log_signal(sig: dict) -> int:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
