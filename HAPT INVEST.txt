@@ -1,0 +1,3 @@
+Check status: schtasks /Query /TN "HAPT_Invest_Daily_Breakout"
+
+End running task: schtasks /End /TN "HAPT_Invest_Daily_Breakout"
