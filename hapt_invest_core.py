@@ -1,3 +1,4 @@
+from scanner_engine import TechnicalEngine
 from audit_telemetry import send_heartbeat_alert
 # -*- coding: utf-8 -*-
 """
