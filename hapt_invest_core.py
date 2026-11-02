@@ -90,7 +90,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO signals (timestamp, ticker, market, signal_type, grade, confidence, price, stop_loss, tp1, tp2, rvol, atr_expansion, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ([SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS])
         """, (
             datetime.now().isoformat(),
             sig['ticker'], sig['market'], sig['signal_type'], sig['grade'],
@@ -119,21 +119,19 @@ class MarketGatekeeper:
     accounting automatically for US/UK clock changes.
     """
     try:
-        from zoneinfo import ZoneInfo # Python 3.9+ standard library
+        from zoneinfo import ZoneInfo
     except ImportError:
         from pytz import timezone as ZoneInfo
         
     try:
         now_et = datetime.now(ZoneInfo("America/New_York"))
     except Exception:
-        # Fallback if timezone database is missing
         now_et = datetime.now()
 
     if now_et.weekday() >= 5: # Weekend check
         return False
         
     current_time = now_et.time()
-    # 8:30 AM ET (1 hour pre-market scan start) to 4:00 PM ET (EOD close)
     return dtime(8, 30) <= current_time <= dtime(16, 0)
 
 
@@ -267,7 +265,7 @@ def check_and_apply_breakeven(position, current_price):
     target_1r = entry_price + risk_r  # Assuming long position
 
     if current_price >= target_1r:
-        print(f"?? [+1R REACHED] Ticker {position.get('ticker')} hit +1R (${target_1r:.2f}). Moving stop to breakeven: ${entry_price:.2f}")
+        print(f"[INFO] [+1R REACHED] Ticker {position.get('ticker')} hit +1R (${target_1r:.2f}). Moving stop to breakeven: ${entry_price:.2f}")
         try:
             from alpaca_execution import modify_stop_loss
             if order_id:
@@ -277,7 +275,7 @@ def check_and_apply_breakeven(position, current_price):
             
             # Send Telegram notification
             from telegram_notifier import send_telegram_alert
-            send_telegram_alert(f"??? *HAPT INVEST BREAKEVEN LOCK* ???\n? *Ticker*: `{position.get('ticker')}`\n? *Hit*: +1R target\n? *Stop Loss*: Moved to Breakeven (`${entry_price:.2f}`)")
+            send_telegram_alert(f"[INFO][SUCCESS] *HAPT INVEST BREAKEVEN LOCK* [INFO][SUCCESS]\n[SUCCESS] *Ticker*: `{position.get('ticker')}`\n[SUCCESS] *Hit*: +1R target\n[SUCCESS] *Stop Loss*: Moved to Breakeven (`${entry_price:.2f}`)")
         except Exception as e:
             print(f"[ERROR] Failed to update stop loss to breakeven: {e}")
 
