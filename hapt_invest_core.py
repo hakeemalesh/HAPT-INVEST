@@ -94,7 +94,7 @@ class DatabaseManager:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO signals (timestamp, ticker, market, signal_type, grade, confidence, price, stop_loss, tp1, tp2, rvol, atr_expansion, status)
-            VALUES ([SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS], [SUCCESS])
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.now().isoformat(),
             sig['ticker'], sig['market'], sig['signal_type'], sig['grade'],
