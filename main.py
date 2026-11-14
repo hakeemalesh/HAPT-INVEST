@@ -1,3 +1,5 @@
+﻿from dotenv import load_dotenv
+load_dotenv()
 from hapt_invest_core import send_interactive_telegram_alert, calculate_breakout_confidence
 import scanner_engine
 import valuation_engine
@@ -17,7 +19,7 @@ PORTFOLIO = [
 
 def main():
     print("=" * 50)
-    print("🚀 LAUNCHING MULTI-EXCHANGE HAPT - INVEST PLATFORM")
+    print("ðŸš€ LAUNCHING MULTI-EXCHANGE HAPT - INVEST PLATFORM")
     print("=" * 50 + "\n")
 
     print("--- [MODULE 1/3]: FULL MARKET DYNAMIC SCANNERS ---")
@@ -34,7 +36,7 @@ def main():
     print("\n")
 
     print("=" * 50)
-    print("✅ MULTI-EXCHANGE PIPELINE EXECUTION COMPLETE")
+    print("âœ… MULTI-EXCHANGE PIPELINE EXECUTION COMPLETE")
     print("=" * 50)
 
 if __name__ == "__main__":
