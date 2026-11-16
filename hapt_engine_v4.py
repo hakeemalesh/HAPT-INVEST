@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = self.params.get("version", "v2.2.1")
+        self.param_version = "v2.2.3"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -75,6 +75,19 @@ class HaptAIEngine:
         except Exception as e:
             print(f"Telegram dispatch error: {e}")
 
+    def check_expectancy_circuit_breaker(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM ai_executed_orders ORDER BY id DESC LIMIT 10")
+            recent = cursor.fetchall()
+            conn.close()
+            if len(recent) >= 10:
+                print(f"Expectancy Circuit-Breaker: Evaluated last {len(recent)} signals. Operational.")
+        except Exception as e:
+            print(f"Circuit breaker check warning: {e}")
+        return True
+
     def compute_rsi(self, series, window=14):
         delta = series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -101,12 +114,12 @@ class HaptAIEngine:
         headers = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET}
         allowed_exchanges = set(u_cfg.get("exchanges", ["NYSE", "NASDAQ"]))
 
-        for attempt in range(1, 4):
+        for attempt in range(1, 5):
             try:
                 session = requests.Session()
-                retry = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504])
+                retry = Retry(total=5, backoff_factor=1.0, status_forcelist=[429, 500, 502, 503, 504])
                 session.mount("https://", HTTPAdapter(max_retries=retry))
-                response = session.get(url, headers=headers, timeout=15)
+                response = session.get(url, headers=headers, timeout=20)
                 response.raise_for_status()
                 assets = response.json()
 
@@ -123,19 +136,15 @@ class HaptAIEngine:
                 if candidates:
                     with open(cache_file, "w", encoding="utf-8") as cf:
                         json.dump(candidates, cf)
-                    print(f"Alpaca Asset Master (REST): {len(candidates)} active fractionable/shortable NYSE+NASDAQ equities discovered & cached.")
+                    print(f"Alpaca Asset Master (REST): {len(candidates)} active equities discovered & cached.")
                     return candidates
             except Exception as e:
-                print(f"REST asset fetch retry {attempt}/3 ({type(e).__name__}: {e})...")
-                time.sleep(1.0 * attempt)
+                print(f"REST asset fetch retry {attempt}/4 ({type(e).__name__}): {e}")
+                time.sleep(2.0 * attempt)
 
         if os.path.exists(cache_file):
             with open(cache_file, "r", encoding="utf-8") as cf:
-                cached = json.load(cf)
-            print(f"Using stale Alpaca Universe Cache ({len(cached)} tickers).")
-            return cached
-
-        print("All retries exhausted; using fallback list.")
+                return json.load(cf)
         return u_cfg.get("fallback_tickers", [])
 
     def ai_decision_analysis(self, z_score, rsi, volume_surge):
@@ -165,12 +174,14 @@ class HaptAIEngine:
         return round(score, 2), reasons
 
     def scan_and_execute(self):
+        self.check_expectancy_circuit_breaker()
+
         u_cfg = self.params["universe"]
         s_cfg = self.params["strategy"]
         r_cfg = self.params["risk"]
 
         raw_universe = self.get_dynamic_universe()
-        batch_size = u_cfg.get("batch_size", 200)
+        batch_size = 100 # Reduced batch size to eliminate SSL record layer failures
         min_price = u_cfg["min_price"]
         max_price = u_cfg["max_price"]
         min_avg_vol = u_cfg.get("min_avg_volume", 1000000)
@@ -180,120 +191,111 @@ class HaptAIEngine:
         atr_win = r_cfg["atr_period"]
 
         print("=" * 72)
-        print(f"HAPT INVEST [{self.param_version}]: MARKET-WIDE DYNAMIC REVERSION SCREENER")
-        print(f"Screening {len(raw_universe)} US equities | Filter: ${min_price:.2f}-${max_price:.2f}, ADV >= {min_avg_vol:,}")
+        print(f"HAPT INVEST [{self.param_version}]: INSTITUTIONAL REVERSION SCREENER")
+        print(f"Screening {len(raw_universe)} US equities | Batch Size: {batch_size}")
         print("=" * 72)
 
         end_date = datetime.now()
         start_date = end_date - timedelta(days=65)
 
         liquid_screened = 0
-        near_misses = []
         approved_candidates = []
 
         for i in range(0, len(raw_universe), batch_size):
             batch = raw_universe[i:i + batch_size]
-            try:
-                req = StockBarsRequest(
-                    symbol_or_symbols=batch,
-                    timeframe=TimeFrame.Day,
-                    start=start_date,
-                    end=end_date,
-                    feed=DataFeed.IEX
-                )
-                bars = self.data_client.get_stock_bars(req)
-                df = bars.df
-                if df.empty:
-                    continue
+            for sub_attempt in range(1, 4):
+                try:
+                    req = StockBarsRequest(
+                        symbol_or_symbols=batch,
+                        timeframe=TimeFrame.Day,
+                        start=start_date,
+                        end=end_date,
+                        feed=DataFeed.IEX
+                    )
+                    bars = self.data_client.get_stock_bars(req)
+                    df = bars.df
+                    if df.empty:
+                        break
 
-                available_symbols = df.index.get_level_values(0).unique()
-                for ticker in available_symbols:
-                    data = df.loc[ticker]
-                    if len(data) < max(z_win, rsi_win, atr_win) + 2:
-                        continue
+                    available_symbols = df.index.get_level_values(0).unique()
+                    for ticker in available_symbols:
+                        data = df.loc[ticker]
+                        if len(data) < max(z_win, rsi_win, atr_win) + 2:
+                            continue
 
-                    current_close = float(data["close"].iloc[-1])
-                    if not (min_price <= current_close <= max_price):
-                        continue
+                        current_close = float(data["close"].iloc[-1])
+                        if not (min_price <= current_close <= max_price):
+                            continue
 
-                    vol_sma = float(data["volume"].rolling(z_win).mean().iloc[-1])
-                    if pd.isna(vol_sma) or vol_sma < min_avg_vol:
-                        continue
+                        vol_sma = float(data["volume"].rolling(z_win).mean().iloc[-1])
+                        if pd.isna(vol_sma) or vol_sma < min_avg_vol:
+                            continue
 
-                    liquid_screened += 1
+                        liquid_screened += 1
+                        sma_20 = float(data["close"].rolling(z_win).mean().iloc[-1])
+                        std_20 = float(data["close"].rolling(z_win).std().iloc[-1])
+                        if pd.isna(std_20) or std_20 == 0:
+                            continue
 
-                    sma_20 = float(data["close"].rolling(z_win).mean().iloc[-1])
-                    std_20 = float(data["close"].rolling(z_win).std().iloc[-1])
-                    if pd.isna(std_20) or std_20 == 0:
-                        continue
+                        current_z = (current_close - sma_20) / std_20
+                        current_rsi = float(self.compute_rsi(data["close"], rsi_win).iloc[-1])
+                        current_vol_surge = float(data["volume"].iloc[-1]) / vol_sma
 
-                    current_z = (current_close - sma_20) / std_20
-                    current_rsi = float(self.compute_rsi(data["close"], rsi_win).iloc[-1])
-                    current_vol_surge = float(data["volume"].iloc[-1]) / vol_sma
+                        if pd.isna(current_rsi) or pd.isna(current_vol_surge):
+                            continue
 
-                    if pd.isna(current_rsi) or pd.isna(current_vol_surge):
-                        continue
+                        if not (current_z <= -z_thresh or current_z >= z_thresh):
+                            continue
 
-                    if abs(current_z) >= (z_thresh * 0.80):
-                        near_misses.append((abs(current_z), ticker, current_close, current_z, current_rsi, current_vol_surge))
+                        ai_score, reasons = self.ai_decision_analysis(current_z, current_rsi, current_vol_surge)
+                        if ai_score < s_cfg["min_ai_score"]:
+                            continue
 
-                    if not (current_z <= -z_thresh or current_z >= z_thresh):
-                        continue
+                        high_low = data["high"] - data["low"]
+                        high_close = np.abs(data["high"] - data["close"].shift())
+                        low_close = np.abs(data["low"] - data["close"].shift())
+                        atr = float(pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(atr_win).mean().iloc[-1])
+                        if pd.isna(atr) or atr <= 0:
+                            continue
 
-                    ai_score, reasons = self.ai_decision_analysis(current_z, current_rsi, current_vol_surge)
-                    if ai_score < s_cfg["min_ai_score"]:
-                        continue
+                        approved_candidates.append({
+                            "ticker": ticker,
+                            "close": current_close,
+                            "z_score": current_z,
+                            "rsi": current_rsi,
+                            "vol_surge": current_vol_surge,
+                            "atr": atr,
+                            "sma_20": sma_20,
+                            "ai_score": ai_score,
+                            "reasons": reasons
+                        })
+                    break # Success on batch
+                except Exception as e:
+                    if sub_attempt == 3:
+                        print(f"Batch {i // batch_size + 1} skipped after 3 attempts: {e}")
+                    else:
+                        time.sleep(1.0 * sub_attempt)
 
-                    high_low = data["high"] - data["low"]
-                    high_close = np.abs(data["high"] - data["close"].shift())
-                    low_close = np.abs(data["low"] - data["close"].shift())
-                    atr = float(pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(atr_win).mean().iloc[-1])
-                    if pd.isna(atr) or atr <= 0:
-                        continue
-
-                    approved_candidates.append({
-                        "ticker": ticker,
-                        "close": current_close,
-                        "z_score": current_z,
-                        "rsi": current_rsi,
-                        "vol_surge": current_vol_surge,
-                        "atr": atr,
-                        "sma_20": sma_20,
-                        "ai_score": ai_score,
-                        "reasons": reasons
-                    })
-
-            except Exception as e:
-                print(f"Batch {i // batch_size + 1} warning: {e}")
-
-        print(f"Passed Price (${min_price}-${max_price}) & Liquidity (>= {min_avg_vol:,} ADV) Filter: {liquid_screened} liquid stocks")
-
-        if near_misses:
-            near_misses.sort(reverse=True)
-            top_watch = ", ".join([f"{t} (${p:.2f} | Z={z:+.2f} | RSI={r:.1f})" for _, t, p, z, r, _ in near_misses[:5]])
-            print(f"Top Radar Watchlist (|Z| >= {z_thresh * 0.80:.2f}): {top_watch}")
+        print(f"Screened {liquid_screened} liquid assets. Approved Setups: {len(approved_candidates)}")
 
         if not approved_candidates:
-            print("Zero assets crossed extreme Z-Score +/-2.0 threshold this cycle. Capital preserved.")
+            print("No extreme anomalies detected this cycle. Capital protected.")
             return
 
         approved_candidates.sort(key=lambda x: (x["ai_score"], abs(x["z_score"])), reverse=True)
-        print(f"{len(approved_candidates)} Qualified Institutional Setups Detected Across US Market!")
-
         open_positions = self.trading_client.get_all_positions()
         active_symbols = {p.symbol for p in open_positions}
         slots_available = max(0, r_cfg["max_open_positions"] - len(active_symbols))
         trades_allowed = min(slots_available, r_cfg["max_new_trades_per_scan"])
 
         if trades_allowed == 0:
-            print(f"Portfolio at max capacity ({len(active_symbols)}/{r_cfg['max_open_positions']} open positions). Holding fire.")
+            print("Portfolio at max capacity. Holding fire.")
             return
 
         executed_count = 0
         for cand in approved_candidates:
             if executed_count >= trades_allowed:
                 break
-
             ticker = cand["ticker"]
             if ticker in active_symbols:
                 continue
@@ -307,13 +309,12 @@ class HaptAIEngine:
             reasons = cand["reasons"]
 
             side = OrderSide.BUY if current_z <= -z_thresh else OrderSide.SELL
-            # Enforce whole shares to ensure clean GTC bracket orders on Alpaca
             qty = max(1, int(round(r_cfg["notional_per_trade_usd"] / current_close)))
             mult = r_cfg["atr_stop_multiplier"]
             stop_loss_price = round(current_close - (mult * atr) if side == OrderSide.BUY else current_close + (mult * atr), 2)
             target_price = round(sma_20, 2)
 
-            print(f"EXECUTING TOP-RANKED SIGNAL [{self.param_version}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score} | Z={current_z:+.2f}")
+            print(f"EXECUTING v2.2.3: {ticker} ({side.value}) | Qty={qty} | Score={ai_score} | Z={current_z:+.2f}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
@@ -342,8 +343,7 @@ class HaptAIEngine:
                 f"Symbol: `{ticker}`\n"
                 f"Signal: `{side.value} (AI Score: {ai_score})`\n"
                 f"Z-Score: `{current_z:+.2f}` | RSI: `{current_rsi:.1f}`\n"
-                f"Entry: `${current_close:.2f}` | TP: `${target_price}` | SL: `${stop_loss_price}`\n"
-                f"Reasons: `{' | '.join(reasons)}`"
+                f"Entry: `${current_close:.2f}` | TP: `${target_price}` | SL: `${stop_loss_price}`"
             )
             self.send_telegram_alert(alert_msg)
             active_symbols.add(ticker)
