@@ -1,14 +1,17 @@
 import os
 import json
 import sqlite3
+import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetAssetsRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, AssetClass, AssetStatus
+from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -30,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = self.params.get("version", "v2.2.0")
+        self.param_version = self.params.get("version", "v2.2.1")
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -84,27 +87,56 @@ class HaptAIEngine:
         if u_cfg.get("mode") != "dynamic_alpaca_screener":
             return u_cfg.get("fallback_tickers", [])
 
-        try:
-            req = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
-            assets = self.trading_client.get_all_assets(req)
-            allowed_exchanges = set(u_cfg.get("exchanges", ["NYSE", "NASDAQ"]))
+        cache_file = "alpaca_universe_cache.json"
+        ttl_sec = u_cfg.get("cache_ttl_hours", 24) * 3600
 
-            candidates = [
-                a.symbol for a in assets
-                if getattr(a, "tradable", False)
-                and getattr(a, "fractionable", False)
-                and getattr(a, "marginable", False)
-                and getattr(a, "shortable", False)
-                and str(getattr(a, "exchange", "")).split(".")[-1] in allowed_exchanges
-                and a.symbol.isalpha()
-                and len(a.symbol) <= 5
-            ]
-            candidates = sorted(candidates)
-            print(f"Alpaca Asset Master: {len(candidates)} active fractionable/shortable NYSE+NASDAQ equities discovered.")
-            return candidates
-        except Exception as e:
-            print(f"Dynamic asset fetch fallback ({e}). Using fallback list.")
-            return u_cfg.get("fallback_tickers", [])
+        if os.path.exists(cache_file) and (time.time() - os.path.getmtime(cache_file)) < ttl_sec:
+            with open(cache_file, "r", encoding="utf-8") as cf:
+                cached = json.load(cf)
+            if len(cached) >= 100:
+                print(f"Alpaca Universe Cache: Loaded {len(cached)} NYSE+NASDAQ equities.")
+                return cached
+
+        url = "https://paper-api.alpaca.markets/v2/assets?status=active&asset_class=us_equity"
+        headers = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET}
+        allowed_exchanges = set(u_cfg.get("exchanges", ["NYSE", "NASDAQ"]))
+
+        for attempt in range(1, 4):
+            try:
+                session = requests.Session()
+                retry = Retry(total=3, backoff_factor=0.6, status_forcelist=[429, 500, 502, 503, 504])
+                session.mount("https://", HTTPAdapter(max_retries=retry))
+                response = session.get(url, headers=headers, timeout=15)
+                response.raise_for_status()
+                assets = response.json()
+
+                candidates = sorted([
+                    a["symbol"] for a in assets
+                    if a.get("tradable", False)
+                    and a.get("fractionable", False)
+                    and a.get("marginable", False)
+                    and a.get("shortable", False)
+                    and str(a.get("exchange", "")).split(".")[-1] in allowed_exchanges
+                    and a["symbol"].isalpha()
+                    and len(a["symbol"]) <= 5
+                ])
+                if candidates:
+                    with open(cache_file, "w", encoding="utf-8") as cf:
+                        json.dump(candidates, cf)
+                    print(f"Alpaca Asset Master (REST): {len(candidates)} active fractionable/shortable NYSE+NASDAQ equities discovered & cached.")
+                    return candidates
+            except Exception as e:
+                print(f"REST asset fetch retry {attempt}/3 ({type(e).__name__}: {e})...")
+                time.sleep(1.0 * attempt)
+
+        if os.path.exists(cache_file):
+            with open(cache_file, "r", encoding="utf-8") as cf:
+                cached = json.load(cf)
+            print(f"Using stale Alpaca Universe Cache ({len(cached)} tickers).")
+            return cached
+
+        print("All retries exhausted; using fallback list.")
+        return u_cfg.get("fallback_tickers", [])
 
     def ai_decision_analysis(self, z_score, rsi, volume_surge):
         s_cfg = self.params["strategy"]
