@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import requests
 from datetime import datetime, timedelta
@@ -20,7 +20,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 def load_parameters(path="parameters.json"):
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
