@@ -27,7 +27,7 @@
       <StartBoundary>2026-11-16T14:30:00+00:00</StartBoundary>
       <Repetition>
         <Interval>PT1H</Interval>
-        <Duration>PT7H</Duration>
+        <Duration>PT6H15M</Duration>
         <StopAtDurationEnd>true</StopAtDurationEnd>
       </Repetition>
       <ScheduleByDay>
