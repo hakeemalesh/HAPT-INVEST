@@ -307,12 +307,13 @@ class HaptAIEngine:
             reasons = cand["reasons"]
 
             side = OrderSide.BUY if current_z <= -z_thresh else OrderSide.SELL
-            qty = round(r_cfg["notional_per_trade_usd"] / current_close, 2)
+            # Enforce whole shares to ensure clean GTC bracket orders on Alpaca
+            qty = max(1, int(round(r_cfg["notional_per_trade_usd"] / current_close)))
             mult = r_cfg["atr_stop_multiplier"]
             stop_loss_price = round(current_close - (mult * atr) if side == OrderSide.BUY else current_close + (mult * atr), 2)
             target_price = round(sma_20, 2)
 
-            print(f"EXECUTING TOP-RANKED SIGNAL [{self.param_version}]: {ticker} ({side.value}) | Score={ai_score} | Z={current_z:+.2f}")
+            print(f"EXECUTING TOP-RANKED SIGNAL [{self.param_version}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score} | Z={current_z:+.2f}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
