@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.2.4"
+        self.param_version = "v2.2.5"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -310,7 +310,7 @@ class HaptAIEngine:
 
             sector = cand["sector"]
             if sector in active_sectors:
-                print(f"Sector Filter (Priority 4): Skipping {ticker} ({sector}) — sector already represented in active portfolio.")
+                print(f"Sector Filter (Priority 4): Skipping {ticker} ({sector}) â€” sector already represented in active portfolio.")
                 continue
 
             current_close = cand["close"]
