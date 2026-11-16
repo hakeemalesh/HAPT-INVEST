@@ -1,5 +1,5 @@
-{
-    "version":  "v2.2.1",
+﻿{
+    "version":  "v2.2.4",
     "updated_at":  "2026-11-16T22:18:00Z",
     "description":  "Dynamic US Equity Market-Wide Screener + Calibrated Hybrid Mean-Reversion (Z-Score +/-2.0 + RSI 14 -\u003e RSI 50 Exit)",
     "universe":  {

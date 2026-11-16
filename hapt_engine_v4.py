@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.2.3"
+        self.param_version = "v2.2.4"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -75,18 +75,20 @@ class HaptAIEngine:
         except Exception as e:
             print(f"Telegram dispatch error: {e}")
 
-    def check_expectancy_circuit_breaker(self):
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM ai_executed_orders ORDER BY id DESC LIMIT 10")
-            recent = cursor.fetchall()
-            conn.close()
-            if len(recent) >= 10:
-                print(f"Expectancy Circuit-Breaker: Evaluated last {len(recent)} signals. Operational.")
-        except Exception as e:
-            print(f"Circuit breaker check warning: {e}")
-        return True
+    def get_ticker_sector(self, ticker):
+        """Maps tickers to macro sectors to enforce correlation and concentration caps."""
+        crypto_assets = {"IBIT", "BITO", "ETHE", "GBTC", "MSTR", "COIN"}
+        tech_assets = {"AAPL", "MSFT", "NVDA", "AMD", "META", "GOOGL", "AMZN", "TSLA", "NFLX"}
+        finance_assets = {"JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "V", "MA"}
+        energy_assets = {"XOM", "CVX", "COP", "SLB", "OXY", "HAL", "EOG"}
+        healthcare_assets = {"UNH", "JNJ", "PFE", "ABBV", "MRK", "LLY", "TMO"}
+
+        if ticker in crypto_assets: return "Crypto / Digital Assets"
+        if ticker in tech_assets: return "Technology"
+        if ticker in finance_assets: return "Financials"
+        if ticker in energy_assets: return "Energy"
+        if ticker in healthcare_assets: return "Healthcare"
+        return "General Equities"
 
     def compute_rsi(self, series, window=14):
         delta = series.diff()
@@ -174,14 +176,12 @@ class HaptAIEngine:
         return round(score, 2), reasons
 
     def scan_and_execute(self):
-        self.check_expectancy_circuit_breaker()
-
         u_cfg = self.params["universe"]
         s_cfg = self.params["strategy"]
         r_cfg = self.params["risk"]
 
         raw_universe = self.get_dynamic_universe()
-        batch_size = 100 # Reduced batch size to eliminate SSL record layer failures
+        batch_size = 100
         min_price = u_cfg["min_price"]
         max_price = u_cfg["max_price"]
         min_avg_vol = u_cfg.get("min_avg_volume", 1000000)
@@ -191,7 +191,7 @@ class HaptAIEngine:
         atr_win = r_cfg["atr_period"]
 
         print("=" * 72)
-        print(f"HAPT INVEST [{self.param_version}]: INSTITUTIONAL REVERSION SCREENER")
+        print(f"HAPT INVEST [{self.param_version}]: INSTITUTIONAL REVERSION SCREENER + SECTOR FILTER")
         print(f"Screening {len(raw_universe)} US equities | Batch Size: {batch_size}")
         print("=" * 72)
 
@@ -267,12 +267,13 @@ class HaptAIEngine:
                             "atr": atr,
                             "sma_20": sma_20,
                             "ai_score": ai_score,
+                            "sector": self.get_ticker_sector(ticker),
                             "reasons": reasons
                         })
-                    break # Success on batch
+                    break
                 except Exception as e:
                     if sub_attempt == 3:
-                        print(f"Batch {i // batch_size + 1} skipped after 3 attempts: {e}")
+                        print(f"Batch {i // batch_size + 1} skipped: {e}")
                     else:
                         time.sleep(1.0 * sub_attempt)
 
@@ -285,6 +286,13 @@ class HaptAIEngine:
         approved_candidates.sort(key=lambda x: (x["ai_score"], abs(x["z_score"])), reverse=True)
         open_positions = self.trading_client.get_all_positions()
         active_symbols = {p.symbol for p in open_positions}
+        
+        # Track active sectors to prevent concentration risk (Priority 4)
+        active_sectors = set()
+        for p in open_positions:
+            # Infer sector of open positions
+            active_sectors.add(self.get_ticker_sector(p.symbol))
+
         slots_available = max(0, r_cfg["max_open_positions"] - len(active_symbols))
         trades_allowed = min(slots_available, r_cfg["max_new_trades_per_scan"])
 
@@ -298,6 +306,11 @@ class HaptAIEngine:
                 break
             ticker = cand["ticker"]
             if ticker in active_symbols:
+                continue
+
+            sector = cand["sector"]
+            if sector in active_sectors:
+                print(f"Sector Filter (Priority 4): Skipping {ticker} ({sector}) — sector already represented in active portfolio.")
                 continue
 
             current_close = cand["close"]
@@ -314,7 +327,7 @@ class HaptAIEngine:
             stop_loss_price = round(current_close - (mult * atr) if side == OrderSide.BUY else current_close + (mult * atr), 2)
             target_price = round(sma_20, 2)
 
-            print(f"EXECUTING v2.2.3: {ticker} ({side.value}) | Qty={qty} | Score={ai_score} | Z={current_z:+.2f}")
+            print(f"EXECUTING v2.2.4 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
@@ -340,13 +353,14 @@ class HaptAIEngine:
 
             alert_msg = (
                 f"*HAPT AI TRADING DESK [{self.param_version}]*\n"
-                f"Symbol: `{ticker}`\n"
+                f"Symbol: `{ticker}` ({sector})\n"
                 f"Signal: `{side.value} (AI Score: {ai_score})`\n"
                 f"Z-Score: `{current_z:+.2f}` | RSI: `{current_rsi:.1f}`\n"
                 f"Entry: `${current_close:.2f}` | TP: `${target_price}` | SL: `${stop_loss_price}`"
             )
             self.send_telegram_alert(alert_msg)
             active_symbols.add(ticker)
+            active_sectors.add(sector)
             executed_count += 1
 
 
