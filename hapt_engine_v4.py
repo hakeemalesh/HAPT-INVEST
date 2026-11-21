@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.3.0"
+        self.param_version = "v2.3.1"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -453,7 +453,7 @@ class HaptAIEngine:
             rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
             conf_pct, conf_grade = self.get_confidence_grade(ai_score)
 
-            print(f"EXECUTING v2.3.0 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
+            print(f"EXECUTING v2.3.1 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
@@ -490,6 +490,81 @@ class HaptAIEngine:
             executed_count += 1
 
 
+
+    def run_lifecycle_session(self):
+        """Enforces 13:30 GMT pre-market briefing, holiday gate, intraday silent scan, and 21:05 GMT closing wrap-up."""
+        now_utc = datetime.utcnow()
+        hour_min = now_utc.hour * 60 + now_utc.minute
+        today_str = now_utc.strftime("%Y-%m-%d")
+        is_friday = (now_utc.weekday() == 4)
+
+        try:
+            clock = self.trading_client.get_clock()
+            is_open = bool(clock.is_open)
+            next_open_date = clock.next_open.strftime("%Y-%m-%d")
+        except Exception as e:
+            print(f"[WARN] Alpaca clock check failed: {e}")
+            is_open = False
+            next_open_date = ""
+
+        # Check if today is a US Market Holiday (weekday where market never opens today)
+        is_trading_day = is_open or (next_open_date == today_str)
+
+        # Window 1: Pre-Market Readiness / Holiday Notice (13:15 - 14:15 GMT / 08:15 - 09:15 EST)
+        if 795 <= hour_min <= 855:
+            if not is_trading_day:
+                msg = (
+                    f"🏛️ *HAPT INVEST [{self.param_version}] — MARKET HOLIDAY NOTICE*\n"
+                    f"Date: `{today_str}` | US Equities Closed Today.\n"
+                    f"Next Scheduled Open: `{next_open_date} 14:30 GMT (09:30 EST)`.\n"
+                    f"Status: Engine standing by silently."
+                )
+                self.send_telegram_alert(msg)
+                print("Holiday notice dispatched. Exiting cleanly.")
+                return
+            else:
+                acct = self.trading_client.get_account()
+                positions = self.trading_client.get_all_positions()
+                msg = (
+                    f"🟢 *HAPT INVEST [{self.param_version}] — PRE-MARKET READY*\n"
+                    f"Bell Opens in ~1 Hour (`14:30 GMT / 09:30 EST`)\n"
+                    f"Portfolio Equity: `${float(acct.equity):,.2f}` | Cash: `${float(acct.cash):,.2f}`\n"
+                    f"Active Positions: `{len(positions)} / {self.params['risk']['max_open_positions']}`\n"
+                    f"Filter: Grade A/A+ (`>=80%`) | Min R:R `1.5:1` | 14d Earnings Blackout Active."
+                )
+                self.send_telegram_alert(msg)
+                print("Pre-market readiness ping sent. Waiting for 14:30 GMT bell.")
+                return
+
+        # Window 2: End-of-Day / End-of-Week Closing Wrap-Up (21:00 - 21:45 GMT / 16:00 - 16:45 EST)
+        if 1260 <= hour_min <= 1305:
+            if not is_trading_day:
+                return
+            acct = self.trading_client.get_account()
+            positions = self.trading_client.get_all_positions()
+            unrealized = sum(float(p.unrealized_pl) for p in positions)
+            header = "📊 *WEEKLY MARKET CLOSE WRAP-UP*" if is_friday else "🌙 *DAILY MARKET CLOSE WRAP-UP*"
+            pos_lines = "\n".join([f"- `{p.symbol}` ({p.qty} sh): `${float(p.market_value):,.2f}` (`${float(p.unrealized_pl):+.2f}`)" for p in positions]) or "- None"
+            msg = (
+                f"{header} `[{self.param_version}]`\n"
+                f"Date: `{today_str}` | Market Closed (`21:00 GMT / 16:00 EST`)\n"
+                f"Equity: `${float(acct.equity):,.2f}` | Cash: `${float(acct.cash):,.2f}`\n"
+                f"Open Unrealized PnL: `${unrealized:+.2f}`\n\n"
+                f"*Open Positions ({len(positions)}):*\n{pos_lines}\n\n"
+                f"Status: Engine entering overnight sleep until next trading session."
+            )
+            self.send_telegram_alert(msg)
+            print("Closing wrap-up dispatched. Engine powering down for the day.")
+            return
+
+        # Window 3: Active Intraday Market Hours (only scans when US market is live & open)
+        if not is_open:
+            print(f"[{now_utc.strftime('%H:%M')} GMT] Market closed outside briefing windows. Silent exit.")
+            return
+
+        self.scan_and_execute()
+
+
 if __name__ == "__main__":
     engine = HaptAIEngine()
-    engine.scan_and_execute()
+    engine.run_lifecycle_session()
