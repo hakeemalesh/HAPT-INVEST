@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.2.5"
+        self.param_version = "v2.3.0"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -149,6 +149,109 @@ class HaptAIEngine:
                 return json.load(cf)
         return u_cfg.get("fallback_tickers", [])
 
+
+    def get_confidence_grade(self, score):
+        pct = int(round(score * 100))
+        if pct >= 90:
+            return pct, "A+"
+        elif pct >= 80:
+            return pct, "A"
+        elif pct >= 70:
+            return pct, "B (Watchlist)"
+        return pct, "C (Reject)"
+
+    def is_earnings_safe(self, ticker, blackout_days=14):
+        try:
+            import yfinance as yf
+            tk = yf.Ticker(ticker)
+            cal = tk.calendar
+            if cal is None:
+                return True, "No upcoming earnings found"
+            edates = []
+            if isinstance(cal, dict) and "Earnings Date" in cal:
+                edates = cal["Earnings Date"]
+            elif hasattr(cal, "loc") and "Earnings Date" in cal.index:
+                edates = list(cal.loc["Earnings Date"])
+            now = datetime.utcnow().date()
+            for d in edates:
+                ed = d.date() if hasattr(d, "date") else datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
+                diff = (ed - now).days
+                if -1 <= diff <= blackout_days:
+                    return False, f"Earnings in {diff}d ({ed})"
+            return True, "Clear"
+        except Exception:
+            return True, "Calendar unavailable"
+
+    def has_negative_news_shock(self, ticker):
+        try:
+            url = f"https://data.alpaca.markets/v1beta1/news?symbols={ticker}&limit=5"
+            headers = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET}
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                news_items = resp.json().get("news", [])
+                red_flags = ("fraud", "sec ", "lawsuit", "bankruptcy", "downgrade", "guidance cut", "offering", "subpoena")
+                for item in news_items:
+                    headline = (item.get("headline") or "").lower()
+                    if any(flag in headline for flag in red_flags):
+                        return True, item.get("headline", "Negative catalyst")
+            return False, "Clean"
+        except Exception:
+            return False, "News check skipped"
+
+    def manage_active_exits(self):
+        s_cfg = self.params["strategy"]
+        rsi_exit = s_cfg.get("rsi_exit_target", 50.0)
+        max_days = s_cfg.get("max_hold_trading_days", 8)
+        positions = self.trading_client.get_all_positions()
+        if not positions:
+            return
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        for pos in positions:
+            sym = pos.symbol
+            # Check holding duration from SQLite entry timestamp
+            cursor.execute("SELECT timestamp FROM ai_executed_orders WHERE ticker=? ORDER BY id DESC LIMIT 1", (sym,))
+            row = cursor.fetchone()
+            held_days = 0
+            if row and row[0]:
+                try:
+                    entry_dt = datetime.strptime(str(row[0])[:19], "%Y-%m-%d %H:%M:%S")
+                    held_days = np.busday_count(entry_dt.date(), datetime.utcnow().date())
+                except Exception:
+                    held_days = 0
+
+            # Check 2-day pre-earnings forced exit
+            safe_earn, earn_reason = self.is_earnings_safe(sym, blackout_days=2)
+            if not safe_earn:
+                print(f"PRE-EARNINGS EXIT: Closing {sym} ({earn_reason})")
+                self.trading_client.close_position(sym)
+                self.send_telegram_alert(f"⚠️ *PRE-EARNINGS EXIT [{self.param_version}]*\nClosed `{sym}` ahead of earnings ({earn_reason}).")
+                continue
+
+            # Check 8-trading-day time-stop
+            if held_days >= max_days:
+                print(f"TIME-STOP EXIT: Closing {sym} after {held_days} trading days")
+                self.trading_client.close_position(sym)
+                self.send_telegram_alert(f"⏱️ *TIME-STOP EXIT [{self.param_version}]*\nClosed `{sym}` after {held_days} trading days (capital rotation).")
+                continue
+
+            # Check Dynamic RSI-50 Mean-Reversion Profit Exit
+            try:
+                bars = self.data_client.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=sym, timeframe=TimeFrame.Day,
+                    start=datetime.utcnow() - timedelta(days=35), feed=DataFeed.IEX
+                )).df
+                if not bars.empty:
+                    closes = bars.loc[sym]["close"] if sym in bars.index.get_level_values(0) else bars["close"]
+                    curr_rsi = float(self.compute_rsi(closes, s_cfg["rsi_period"]).iloc[-1])
+                    if curr_rsi >= rsi_exit and float(pos.unrealized_pl) > 0:
+                        print(f"RSI-50 PROFIT EXIT: Closing {sym} (RSI={curr_rsi:.1f} >= {rsi_exit})")
+                        self.trading_client.close_position(sym)
+                        self.send_telegram_alert(f"🎯 *RSI-50 PROFIT EXIT [{self.param_version}]*\nClosed `{sym}` | RSI: `{curr_rsi:.1f}` | PnL: `${float(pos.unrealized_pl):.2f}`")
+            except Exception as e:
+                print(f"Exit check skip for {sym}: {e}")
+        conn.close()
+
     def ai_decision_analysis(self, z_score, rsi, volume_surge):
         s_cfg = self.params["strategy"]
         z_thresh = s_cfg["z_score_threshold"]
@@ -176,6 +279,7 @@ class HaptAIEngine:
         return round(score, 2), reasons
 
     def scan_and_execute(self):
+        self.manage_active_exits()
         u_cfg = self.params["universe"]
         s_cfg = self.params["strategy"]
         r_cfg = self.params["risk"]
@@ -245,6 +349,10 @@ class HaptAIEngine:
                             continue
 
                         if not (current_z <= -z_thresh or current_z >= z_thresh):
+                            continue
+
+                        daily_ret_pct = ((current_close - float(data["close"].iloc[-2])) / float(data["close"].iloc[-2])) * 100.0
+                        if daily_ret_pct <= -abs(s_cfg.get("max_single_day_drop_pct", 6.0)):
                             continue
 
                         ai_score, reasons = self.ai_decision_analysis(current_z, current_rsi, current_vol_surge)
@@ -323,11 +431,29 @@ class HaptAIEngine:
 
             side = OrderSide.BUY if current_z <= -z_thresh else OrderSide.SELL
             qty = max(1, int(round(r_cfg["notional_per_trade_usd"] / current_close)))
-            mult = r_cfg["atr_stop_multiplier"]
-            stop_loss_price = round(current_close - (mult * atr) if side == OrderSide.BUY else current_close + (mult * atr), 2)
-            target_price = round(sma_20, 2)
+            # 14-Day Earnings Blackout & News Catalyst Check
+            earn_ok, earn_msg = self.is_earnings_safe(ticker, s_cfg.get("earnings_blackout_days", 14))
+            if not earn_ok:
+                print(f"SKIPPING {ticker}: {earn_msg}")
+                continue
+            news_bad, news_msg = self.has_negative_news_shock(ticker)
+            if news_bad:
+                print(f"SKIPPING {ticker}: Negative news shock ({news_msg})")
+                continue
 
-            print(f"EXECUTING v2.2.4 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
+            mult = r_cfg["atr_stop_multiplier"]
+            min_rrr = r_cfg.get("min_reward_risk_ratio", 1.5)
+            risk_per_share = mult * atr
+            if side == OrderSide.BUY:
+                stop_loss_price = round(current_close - risk_per_share, 2)
+                target_price = round(max(sma_20, current_close + (min_rrr * risk_per_share)), 2)
+            else:
+                stop_loss_price = round(current_close + risk_per_share, 2)
+                target_price = round(min(sma_20, current_close - (min_rrr * risk_per_share)), 2)
+            rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
+            conf_pct, conf_grade = self.get_confidence_grade(ai_score)
+
+            print(f"EXECUTING v2.3.0 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
@@ -354,8 +480,8 @@ class HaptAIEngine:
             alert_msg = (
                 f"*HAPT AI TRADING DESK [{self.param_version}]*\n"
                 f"Symbol: `{ticker}` ({sector})\n"
-                f"Signal: `{side.value} (AI Score: {ai_score})`\n"
-                f"Z-Score: `{current_z:+.2f}` | RSI: `{current_rsi:.1f}`\n"
+                f"Signal: `{side.value.upper()}` | AI Confidence: `{conf_pct}% (Grade: {conf_grade})`\n"
+                f"Z-Score: `{current_z:+.2f}` | RSI: `{current_rsi:.1f}` | R:R: `{rrr_actual}:1`\n"
                 f"Entry: `${current_close:.2f}` | TP: `${target_price}` | SL: `${stop_loss_price}`"
             )
             self.send_telegram_alert(alert_msg)

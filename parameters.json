@@ -1,76 +1,41 @@
-﻿{
-    "version":  "v2.2.5",
-    "updated_at":  "2026-11-16T22:18:00Z",
-    "description":  "Dynamic US Equity Market-Wide Screener + Calibrated Hybrid Mean-Reversion (Z-Score +/-2.0 + RSI 14 -\u003e RSI 50 Exit)",
-    "universe":  {
-                     "mode":  "dynamic_alpaca_screener",
-                     "exchanges":  [
-                                       "NYSE",
-                                       "NASDAQ"
-                                   ],
-                     "min_price":  3.0,
-                     "max_price":  60.0,
-                     "min_avg_volume":  1000000,
-                     "batch_size":  200,
-                     "fallback_tickers":  [
-                                              "SOFI",
-                                              "PLTR",
-                                              "F",
-                                              "AMD",
-                                              "INTC",
-                                              "BAC",
-                                              "SNAP",
-                                              "VALE",
-                                              "CCL",
-                                              "PBR",
-                                              "AAL",
-                                              "LCID",
-                                              "UBER",
-                                              "LYFT",
-                                              "RIVN",
-                                              "NCLH",
-                                              "KGC",
-                                              "CLF",
-                                              "HAL",
-                                              "MU",
-                                              "SCHW",
-                                              "PYPL",
-                                              "HOOD",
-                                              "DKNG",
-                                              "ON",
-                                              "WBD",
-                                              "C",
-                                              "T",
-                                              "VZ",
-                                              "COIN",
-                                              "MARA",
-                                              "RIOT",
-                                              "ET",
-                                              "AIG",
-                                              "KEY",
-                                              "ZIM",
-                                              "NOK",
-                                              "PFE",
-                                              "ABEV",
-                                              "TAL"
-                                          ],
-                     "cache_ttl_hours":  24
-                 },
-    "strategy":  {
-                     "z_score_window":  20,
-                     "z_score_threshold":  2.0,
-                     "rsi_period":  14,
-                     "rsi_oversold":  30.0,
-                     "rsi_overbought":  70.0,
-                     "rsi_exit_target":  50.0,
-                     "min_volume_surge":  1.0,
-                     "min_ai_score":  0.5
-                 },
-    "risk":  {
-                 "notional_per_trade_usd":  500.0,
-                 "atr_period":  14,
-                 "atr_stop_multiplier":  2.5,
-                 "max_open_positions":  5,
-                 "max_new_trades_per_scan":  2
-             }
+{
+    "version": "v2.3.0",
+    "updated_at": "2026-11-21T16:00:00Z",
+    "description": "Institutional Grade A/A+ Hybrid Mean-Reversion (1.5:1 Min RRR, 14-Day Earnings Blackout, News Veto & 8-Day Time-Stop)",
+    "universe": {
+        "mode": "dynamic_alpaca_screener",
+        "exchanges": ["NYSE", "NASDAQ"],
+        "min_price": 3.0,
+        "max_price": 60.0,
+        "min_avg_volume": 1000000,
+        "batch_size": 100,
+        "fallback_tickers": [
+            "SOFI", "PLTR", "F", "AMD", "INTC", "BAC", "SNAP", "VALE", "CCL", "PBR",
+            "AAL", "LCID", "UBER", "LYFT", "RIVN", "NCLH", "KGC", "CLF", "HAL", "MU",
+            "SCHW", "PYPL", "HOOD", "DKNG", "ON", "WBD", "C", "T", "VZ", "COIN",
+            "MARA", "RIOT", "ET", "AIG", "KEY", "ZIM", "NOK", "PFE", "ABEV", "TAL"
+        ],
+        "cache_ttl_hours": 24
+    },
+    "strategy": {
+        "z_score_window": 20,
+        "z_score_threshold": 2.0,
+        "rsi_period": 14,
+        "rsi_oversold": 30.0,
+        "rsi_overbought": 70.0,
+        "rsi_exit_target": 50.0,
+        "min_volume_surge": 1.0,
+        "min_ai_score": 0.80,
+        "max_single_day_drop_pct": 6.0,
+        "earnings_blackout_days": 14,
+        "max_hold_trading_days": 8
+    },
+    "risk": {
+        "notional_per_trade_usd": 500.0,
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.5,
+        "min_reward_risk_ratio": 1.5,
+        "max_open_positions": 5,
+        "max_new_trades_per_scan": 2
+    }
 }
