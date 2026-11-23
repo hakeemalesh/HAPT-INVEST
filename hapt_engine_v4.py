@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.3.2"
+        self.param_version = "v2.3.3"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -198,6 +198,58 @@ class HaptAIEngine:
         except Exception:
             return False, "News check skipped"
 
+
+
+    def _load_weekly_ledger(self):
+        ledger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_commitment_ledger.json")
+        if os.path.exists(ledger_path):
+            try:
+                with open(ledger_path, "r", encoding="utf-8") as lf:
+                    return json.load(lf), ledger_path
+            except Exception:
+                pass
+        return {"entries": []}, ledger_path
+
+    def get_weekly_committed_usd(self):
+        ledger, _ = self._load_weekly_ledger()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
+        recent = [e for e in ledger.get("entries", []) if float(e.get("ts", 0)) >= cutoff]
+        return sum(float(e.get("notional", 0.0)) for e in recent)
+
+    def record_weekly_commitment(self, symbol, notional_usd):
+        ledger, ledger_path = self._load_weekly_ledger()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
+        entries = [e for e in ledger.get("entries", []) if float(e.get("ts", 0)) >= cutoff]
+        entries.append({
+            "ts": datetime.now(timezone.utc).timestamp(),
+            "symbol": symbol,
+            "notional": round(float(notional_usd), 2)
+        })
+        ledger["entries"] = entries
+        with open(ledger_path, "w", encoding="utf-8") as lf:
+            json.dump(ledger, lf, indent=2)
+
+    def calculate_virtual_trade_notional(self, price):
+        r_cfg = self.params["risk"]
+        if not r_cfg.get("virtual_bankroll_enabled", False):
+            base_notional = float(r_cfg.get("notional_per_trade_usd", 175.0))
+            qty = max(1, int(base_notional // max(price, 0.01)))
+            return qty, round(qty * price, 2)
+
+        virtual_cap = float(r_cfg.get("virtual_capital_usd", 500.0))
+        trade_pct = float(r_cfg.get("per_trade_equity_pct", 0.35))
+        weekly_pct = float(r_cfg.get("max_weekly_equity_pct", 0.70))
+
+        target_notional = virtual_cap * trade_pct
+        weekly_cap_usd = virtual_cap * weekly_pct
+        weekly_used_usd = self.get_weekly_committed_usd()
+        remaining_weekly_usd = max(0.0, weekly_cap_usd - weekly_used_usd)
+
+        allowed_notional = min(target_notional, remaining_weekly_usd)
+        qty = int(allowed_notional // max(price, 0.01))
+        if qty < 1 or allowed_notional < price:
+            return 0, 0.0
+        return qty, round(qty * price, 2)
 
     def update_breakeven_and_trailing_stops(self):
         """Enforces server-side OCO TP+SL on all positions, moving SL to Breakeven at +1.0R and ATR Trailing at +1.5R."""
@@ -548,7 +600,7 @@ class HaptAIEngine:
             rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
             conf_pct, conf_grade = self.get_confidence_grade(ai_score)
 
-            print(f"EXECUTING v2.3.2 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
+            print(f"EXECUTING v2.3.3 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
