@@ -600,7 +600,13 @@ class HaptAIEngine:
             rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
             conf_pct, conf_grade = self.get_confidence_grade(ai_score)
 
-            print(f"EXECUTING v2.3.3 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
+            allowed, v_qty, v_notional, gate_reason = self.can_open_new_virtual_position(float(current_close))
+            if not allowed:
+                print(f"[VIRTUAL GATE SKIP] {ticker} ({side.value}): {gate_reason}")
+                continue
+
+            qty = v_qty
+            print(f"EXECUTING v2.3.4 [{sector}]: {ticker} ({side.value}) | Qty={qty} (~${v_notional:.2f}) | Score={ai_score}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
@@ -612,6 +618,7 @@ class HaptAIEngine:
                 stop_loss=StopLossRequest(stop_price=stop_loss_price)
             )
             self.trading_client.submit_order(order_data=bracket_data)
+            self.record_weekly_commitment(ticker, v_notional)
 
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
