@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.3.1"
+        self.param_version = "v2.3.2"
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -198,7 +198,102 @@ class HaptAIEngine:
         except Exception:
             return False, "News check skipped"
 
+
+    def update_breakeven_and_trailing_stops(self):
+        """Enforces server-side OCO TP+SL on all positions, moving SL to Breakeven at +1.0R and ATR Trailing at +1.5R."""
+        r_cfg = self.params["risk"]
+        be_r = r_cfg.get("breakeven_trigger_r", 1.0)
+        trail_r = r_cfg.get("trailing_trigger_r", 1.5)
+        trail_mult = r_cfg.get("trailing_atr_multiplier", 1.0)
+        atr_period = r_cfg.get("atr_period", 14)
+
+        positions = self.trading_client.get_all_positions()
+        if not positions:
+            return
+        open_orders = self.trading_client.get_orders()
+
+        for pos in positions:
+            sym = pos.symbol
+            qty = int(float(pos.qty))
+            entry = float(pos.avg_entry_price)
+            curr = float(pos.current_price)
+            sym_orders = [o for o in open_orders if o.symbol == sym]
+
+            current_tp = None
+            current_sl = None
+            for o in sym_orders:
+                if o.limit_price is not None:
+                    current_tp = float(o.limit_price)
+                if o.stop_price is not None:
+                    current_sl = float(o.stop_price)
+
+            try:
+                bars = self.data_client.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=sym, timeframe=TimeFrame.Day,
+                    start=datetime.utcnow() - timedelta(days=35), feed=DataFeed.IEX
+                )).df
+                if bars.empty:
+                    continue
+                df_sym = bars.loc[sym] if sym in bars.index.get_level_values(0) else bars
+                tr = pd.concat([
+                    df_sym["high"] - df_sym["low"],
+                    (df_sym["high"] - df_sym["close"].shift()).abs(),
+                    (df_sym["low"] - df_sym["close"].shift()).abs()
+                ], axis=1).max(axis=1)
+                atr = float(tr.rolling(atr_period).mean().iloc[-1])
+            except Exception:
+                continue
+
+            initial_risk = max(0.05, r_cfg["atr_stop_multiplier"] * atr)
+            unrealized_r = (curr - entry) / initial_risk
+
+            # Self-heal if any position ever lacks an active Stop-Loss or Take-Profit
+            if current_tp is None or current_sl is None:
+                target_tp = current_tp or round(entry + (r_cfg["min_reward_risk_ratio"] * initial_risk), 2)
+                target_sl = current_sl or round(entry - initial_risk, 2)
+                for o in sym_orders:
+                    self.trading_client.cancel_order_by_id(o.id)
+                self.trading_client.submit_order(LimitOrderRequest(
+                    symbol=sym, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                    order_class=OrderClass.OCO,
+                    take_profit=TakeProfitRequest(limit_price=target_tp),
+                    stop_loss=StopLossRequest(stop_price=target_sl)
+                ))
+                print(f"[SELF-HEAL OCO] Attached missing TP (${target_tp}) + SL (${target_sl}) on {sym}")
+                continue
+
+            # Determine upgraded Stop-Loss (Breakeven at +1.0R, ATR Trail at +1.5R)
+            new_sl = current_sl
+            mode_label = None
+            if unrealized_r >= trail_r:
+                trailed = round(curr - (trail_mult * atr), 2)
+                if trailed > current_sl + 0.02:
+                    new_sl = trailed
+                    mode_label = f"ATR PROFIT TRAIL (+{unrealized_r:.1f}R)"
+            elif unrealized_r >= be_r:
+                be_price = round(entry + 0.05, 2)
+                if be_price > current_sl + 0.02:
+                    new_sl = be_price
+                    mode_label = f"BREAKEVEN LOCK (+{unrealized_r:.1f}R)"
+
+            if mode_label and new_sl < curr:
+                for o in sym_orders:
+                    self.trading_client.cancel_order_by_id(o.id)
+                self.trading_client.submit_order(LimitOrderRequest(
+                    symbol=sym, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                    order_class=OrderClass.OCO,
+                    take_profit=TakeProfitRequest(limit_price=current_tp),
+                    stop_loss=StopLossRequest(stop_price=new_sl)
+                ))
+                print(f"[{mode_label}] Upgraded {sym} SL: ${current_sl:.2f} -> ${new_sl:.2f}")
+                self.send_telegram_alert(
+                    f"🛡️ *{mode_label} [{self.param_version}]*\n"
+                    f"Symbol: `{sym}` | Price: `${curr:.2f}`\n"
+                    f"Stop-Loss Raised: `${current_sl:.2f}` ➡️ `${new_sl:.2f}` (TP: `${current_tp:.2f}`)"
+                )
+
     def manage_active_exits(self):
+        self.update_breakeven_and_trailing_stops()
         s_cfg = self.params["strategy"]
         rsi_exit = s_cfg.get("rsi_exit_target", 50.0)
         max_days = s_cfg.get("max_hold_trading_days", 8)
@@ -453,7 +548,7 @@ class HaptAIEngine:
             rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
             conf_pct, conf_grade = self.get_confidence_grade(ai_score)
 
-            print(f"EXECUTING v2.3.1 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
+            print(f"EXECUTING v2.3.2 [{sector}]: {ticker} ({side.value}) | Qty={qty} | Score={ai_score}")
 
             bracket_data = MarketOrderRequest(
                 symbol=ticker,
