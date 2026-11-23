@@ -7,7 +7,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest
@@ -172,7 +172,7 @@ class HaptAIEngine:
                 edates = cal["Earnings Date"]
             elif hasattr(cal, "loc") and "Earnings Date" in cal.index:
                 edates = list(cal.loc["Earnings Date"])
-            now = datetime.utcnow().date()
+            now = datetime.now(timezone.utc).replace(tzinfo=None).date()
             for d in edates:
                 ed = d.date() if hasattr(d, "date") else datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
                 diff = (ed - now).days
@@ -230,7 +230,7 @@ class HaptAIEngine:
             try:
                 bars = self.data_client.get_stock_bars(StockBarsRequest(
                     symbol_or_symbols=sym, timeframe=TimeFrame.Day,
-                    start=datetime.utcnow() - timedelta(days=35), feed=DataFeed.IEX
+                    start=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=35), feed=DataFeed.IEX
                 )).df
                 if bars.empty:
                     continue
@@ -311,7 +311,7 @@ class HaptAIEngine:
             if row and row[0]:
                 try:
                     entry_dt = datetime.strptime(str(row[0])[:19], "%Y-%m-%d %H:%M:%S")
-                    held_days = np.busday_count(entry_dt.date(), datetime.utcnow().date())
+                    held_days = np.busday_count(entry_dt.date(), datetime.now(timezone.utc).replace(tzinfo=None).date())
                 except Exception:
                     held_days = 0
 
@@ -334,7 +334,7 @@ class HaptAIEngine:
             try:
                 bars = self.data_client.get_stock_bars(StockBarsRequest(
                     symbol_or_symbols=sym, timeframe=TimeFrame.Day,
-                    start=datetime.utcnow() - timedelta(days=35), feed=DataFeed.IEX
+                    start=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=35), feed=DataFeed.IEX
                 )).df
                 if not bars.empty:
                     closes = bars.loc[sym]["close"] if sym in bars.index.get_level_values(0) else bars["close"]
@@ -588,7 +588,7 @@ class HaptAIEngine:
 
     def run_lifecycle_session(self):
         """Enforces 13:30 GMT pre-market briefing, holiday gate, intraday silent scan, and 21:05 GMT closing wrap-up."""
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         hour_min = now_utc.hour * 60 + now_utc.minute
         today_str = now_utc.strftime("%Y-%m-%d")
         is_friday = (now_utc.weekday() == 4)
