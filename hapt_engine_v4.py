@@ -33,7 +33,7 @@ def load_parameters(path="parameters.json"):
 class HaptAIEngine:
     def __init__(self, param_path="parameters.json"):
         self.params = load_parameters(param_path)
-        self.param_version = "v2.3.3"
+        self.param_version = self.params.get("version", "v2.3.5")
         self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
         self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
         self.db_path = "hapt_invest.db"
@@ -470,6 +470,7 @@ class HaptAIEngine:
                 timeframe=TimeFrame.Week,
                 start=start_dt,
                 end=end_dt,
+                feed=DataFeed.IEX,
             )
             bars = self.data_client.get_stock_bars(req)
             df = bars.df if hasattr(bars, "df") else pd.DataFrame()
