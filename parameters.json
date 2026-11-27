@@ -1,6 +1,6 @@
 {
-    "version": "v2.3.4",
-    "updated_at": "2026-11-24T22:00:00Z",
+    "version": "v2.3.5",
+    "updated_at": "2026-11-27T22:30:00Z",
     "description": "Institutional Grade A/A+ Hybrid Mean-Reversion v2.3.4 ($500 Virtual Bankroll, 35% Trade Cap = $175, 70% Weekly Cap = $350, Max 2 Open Positions)",
     "universe": {
         "mode": "dynamic_alpaca_screener",
@@ -67,7 +67,10 @@
         "min_ai_score": 0.8,
         "max_single_day_drop_pct": 6.0,
         "earnings_blackout_days": 14,
-        "max_hold_trading_days": 8
+        "max_hold_trading_days": 8,
+        "require_weekly_rsi_up": true,
+        "weekly_rsi_period": 14,
+        "weekly_rsi_lookback_weeks": 1
     },
     "risk": {
         "notional_per_trade_usd": 175.0,
