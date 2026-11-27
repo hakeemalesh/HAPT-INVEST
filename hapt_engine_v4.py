@@ -656,10 +656,11 @@ class HaptAIEngine:
             rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
             conf_pct, conf_grade = self.get_confidence_grade(ai_score)
 
-            w_rsi_ok, w_rsi_reason = self.has_rising_weekly_rsi(ticker)
-            if not w_rsi_ok:
-                print(f"[WEEKLY RSI SKIP] {ticker} ({side.value}): {w_rsi_reason}")
-                continue
+            if side == OrderSide.BUY:
+                w_rsi_ok, w_rsi_reason = self.has_rising_weekly_rsi(ticker)
+                if not w_rsi_ok:
+                    print(f"[WEEKLY RSI SKIP] {ticker} ({side.value}): {w_rsi_reason}")
+                    continue
 
             allowed, v_qty, v_notional, gate_reason = self.can_open_new_virtual_position(float(current_close))
             if not allowed:
