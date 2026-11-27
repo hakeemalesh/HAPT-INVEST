@@ -266,7 +266,12 @@ class HaptAIEngine:
 
         for pos in positions:
             sym = pos.symbol
-            qty = int(float(pos.qty))
+            raw_qty = int(float(pos.qty))
+            if raw_qty == 0:
+                continue
+            is_short = raw_qty < 0
+            qty = abs(raw_qty)
+            exit_side = OrderSide.BUY if is_short else OrderSide.SELL
             entry = float(pos.avg_entry_price)
             curr = float(pos.current_price)
             sym_orders = [o for o in open_orders if o.symbol == sym]
@@ -297,47 +302,64 @@ class HaptAIEngine:
                 continue
 
             initial_risk = max(0.05, r_cfg["atr_stop_multiplier"] * atr)
-            unrealized_r = (curr - entry) / initial_risk
+            unrealized_r = ((entry - curr) if is_short else (curr - entry)) / initial_risk
 
             # Self-heal if any position ever lacks an active Stop-Loss or Take-Profit
             if current_tp is None or current_sl is None:
-                target_tp = current_tp or round(entry + (r_cfg["min_reward_risk_ratio"] * initial_risk), 2)
-                target_sl = current_sl or round(entry - initial_risk, 2)
+                if is_short:
+                    target_tp = current_tp or round(max(0.01, entry - (r_cfg["min_reward_risk_ratio"] * initial_risk)), 2)
+                    target_sl = current_sl or round(entry + initial_risk, 2)
+                else:
+                    target_tp = current_tp or round(entry + (r_cfg["min_reward_risk_ratio"] * initial_risk), 2)
+                    target_sl = current_sl or round(max(0.01, entry - initial_risk), 2)
                 for o in sym_orders:
                     self.trading_client.cancel_order_by_id(o.id)
                 self.trading_client.submit_order(LimitOrderRequest(
-                    symbol=sym, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                    symbol=sym, qty=qty, side=exit_side, time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.OCO,
                     take_profit=TakeProfitRequest(limit_price=target_tp),
                     stop_loss=StopLossRequest(stop_price=target_sl)
                 ))
-                print(f"[SELF-HEAL OCO] Attached missing TP (${target_tp}) + SL (${target_sl}) on {sym}")
+                print(f"[SELF-HEAL OCO] Attached missing TP (${target_tp}) + SL (${target_sl}) on {sym} ({'SHORT' if is_short else 'LONG'})")
                 continue
 
             # Determine upgraded Stop-Loss (Breakeven at +1.0R, ATR Trail at +1.5R)
             new_sl = current_sl
             mode_label = None
             if unrealized_r >= trail_r:
-                trailed = round(curr - (trail_mult * atr), 2)
-                if trailed > current_sl + 0.02:
-                    new_sl = trailed
-                    mode_label = f"ATR PROFIT TRAIL (+{unrealized_r:.1f}R)"
+                if is_short:
+                    trailed = round(curr + (trail_mult * atr), 2)
+                    if trailed < current_sl - 0.02:
+                        new_sl = trailed
+                        mode_label = f"ATR PROFIT TRAIL (+{unrealized_r:.1f}R)"
+                else:
+                    trailed = round(curr - (trail_mult * atr), 2)
+                    if trailed > current_sl + 0.02:
+                        new_sl = trailed
+                        mode_label = f"ATR PROFIT TRAIL (+{unrealized_r:.1f}R)"
             elif unrealized_r >= be_r:
-                be_price = round(entry + 0.05, 2)
-                if be_price > current_sl + 0.02:
-                    new_sl = be_price
-                    mode_label = f"BREAKEVEN LOCK (+{unrealized_r:.1f}R)"
+                if is_short:
+                    be_price = round(max(0.01, entry - 0.05), 2)
+                    if be_price < current_sl - 0.02:
+                        new_sl = be_price
+                        mode_label = f"BREAKEVEN LOCK (+{unrealized_r:.1f}R)"
+                else:
+                    be_price = round(entry + 0.05, 2)
+                    if be_price > current_sl + 0.02:
+                        new_sl = be_price
+                        mode_label = f"BREAKEVEN LOCK (+{unrealized_r:.1f}R)"
 
-            if mode_label and new_sl < curr:
+            sl_valid = (new_sl > curr) if is_short else (new_sl < curr)
+            if mode_label and sl_valid:
                 for o in sym_orders:
                     self.trading_client.cancel_order_by_id(o.id)
                 self.trading_client.submit_order(LimitOrderRequest(
-                    symbol=sym, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                    symbol=sym, qty=qty, side=exit_side, time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.OCO,
                     take_profit=TakeProfitRequest(limit_price=current_tp),
                     stop_loss=StopLossRequest(stop_price=new_sl)
                 ))
-                print(f"[{mode_label}] Upgraded {sym} SL: ${current_sl:.2f} -> ${new_sl:.2f}")
+                print(f"[{mode_label}] Upgraded {sym} ({'SHORT' if is_short else 'LONG'}) SL: ${current_sl:.2f} -> ${new_sl:.2f}")
                 self.send_telegram_alert(
                     f"🛡️ *{mode_label} [{self.param_version}]*\n"
                     f"Symbol: `{sym}` | Price: `${curr:.2f}`\n"
@@ -391,8 +413,12 @@ class HaptAIEngine:
                 if not bars.empty:
                     closes = bars.loc[sym]["close"] if sym in bars.index.get_level_values(0) else bars["close"]
                     curr_rsi = float(self.compute_rsi(closes, s_cfg["rsi_period"]).iloc[-1])
-                    if curr_rsi >= rsi_exit and float(pos.unrealized_pl) > 0:
-                        print(f"RSI-50 PROFIT EXIT: Closing {sym} (RSI={curr_rsi:.1f} >= {rsi_exit})")
+                    is_short_pos = float(pos.qty) < 0
+                    rsi_target_hit = (curr_rsi <= rsi_exit) if is_short_pos else (curr_rsi >= rsi_exit)
+                    if rsi_target_hit and float(pos.unrealized_pl) > 0:
+                        cmp_op = "<=" if is_short_pos else ">="
+                        side_tag = "SHORT" if is_short_pos else "LONG"
+                        print(f"RSI-50 PROFIT EXIT [{side_tag}]: Closing {sym} (RSI={curr_rsi:.1f} {cmp_op} {rsi_exit})")
                         self.trading_client.close_position(sym)
                         self.send_telegram_alert(f"🎯 *RSI-50 PROFIT EXIT [{self.param_version}]*\nClosed `{sym}` | RSI: `{curr_rsi:.1f}` | PnL: `${float(pos.unrealized_pl):.2f}`")
             except Exception as e:
