@@ -425,6 +425,62 @@ class HaptAIEngine:
 
         return round(score, 2), reasons
 
+    def has_rising_weekly_rsi(self, symbol: str) -> tuple[bool, str]:
+        strat_cfg = self.params.get("strategy", {}) if hasattr(self, "params") else {}
+        if not strat_cfg.get("require_weekly_rsi_up", False):
+            return True, "weekly_rsi_check_disabled"
+
+        period = int(strat_cfg.get("weekly_rsi_period", 14))
+        lookback = max(1, int(strat_cfg.get("weekly_rsi_lookback_weeks", 1)))
+
+        try:
+            import pandas as pd
+            from datetime import datetime, timedelta, timezone
+
+            end_dt = datetime.now(timezone.utc)
+            start_dt = end_dt - timedelta(weeks=max(40, period * 4 + lookback + 6))
+            req = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Week,
+                start=start_dt,
+                end=end_dt,
+            )
+            bars = self.data_client.get_stock_bars(req)
+            df = bars.df if hasattr(bars, "df") else pd.DataFrame()
+            if df is None or df.empty:
+                return True, "no_weekly_bars_fallback_allow"
+
+            if isinstance(df.index, pd.MultiIndex):
+                if symbol in df.index.get_level_values(0):
+                    df = df.xs(symbol, level=0)
+                else:
+                    df = df.reset_index(level=0, drop=True)
+
+            df = df.sort_index()
+            closes = df["close"].astype(float)
+            if len(closes) < period + lookback + 2:
+                return True, f"insufficient_weekly_bars({len(closes)})"
+
+            delta = closes.diff()
+            gain = delta.clip(lower=0.0)
+            loss = (-delta.clip(upper=0.0))
+            avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+            rs = avg_gain / avg_loss.replace(0.0, float("nan"))
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+            rsi = rsi.ffill().dropna()
+
+            if len(rsi) <= lookback:
+                return True, "insufficient_rsi_history"
+
+            latest_rsi = float(rsi.iloc[-1])
+            prior_rsi = float(rsi.iloc[-1 - lookback])
+            if latest_rsi > prior_rsi:
+                return True, f"weekly_rsi_up({prior_rsi:.1f}->{latest_rsi:.1f})"
+            return False, f"weekly_rsi_not_up({prior_rsi:.1f}->{latest_rsi:.1f})"
+        except Exception as exc:
+            return True, f"weekly_rsi_error_allow({exc})"
+
     def scan_and_execute(self):
         self.manage_active_exits()
         u_cfg = self.params["universe"]
@@ -599,6 +655,11 @@ class HaptAIEngine:
                 target_price = round(min(sma_20, current_close - (min_rrr * risk_per_share)), 2)
             rrr_actual = round(abs(target_price - current_close) / max(0.01, abs(current_close - stop_loss_price)), 2)
             conf_pct, conf_grade = self.get_confidence_grade(ai_score)
+
+            w_rsi_ok, w_rsi_reason = self.has_rising_weekly_rsi(ticker)
+            if not w_rsi_ok:
+                print(f"[WEEKLY RSI SKIP] {ticker} ({side.value}): {w_rsi_reason}")
+                continue
 
             allowed, v_qty, v_notional, gate_reason = self.can_open_new_virtual_position(float(current_close))
             if not allowed:
